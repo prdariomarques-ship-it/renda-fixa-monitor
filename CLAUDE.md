@@ -29,7 +29,16 @@ Body: {"grant_type": "client_credentials"}
 
 Token expira em 3600s — renovado a cada execução do job.
 
-Chamadas à API usam `Authorization: Bearer <token>` + header `client_id`.
+Chamadas à API usam header literal `access_token: <token>` + header `client_id`
+(**não** é `Authorization: Bearer` — a ANBIMA usa gateway Sensedia, que exige o
+header com o nome indicado pelo campo `token_type` da resposta de
+`/oauth/access-token`, que retorna `"access_token"`. Confirmado via teste real
+em 2026-07-20).
+
+**Ambientes**: Sandbox e Produção são separados. Acesso à API em Produção exige
+contato manual com `anbimafeed@anbima.com.br` — aprovação do app no portal e
+assinatura do produto "Índices+" não são suficientes por si só (erro observado:
+`403 Access denied for this environment`).
 
 ## Endpoints (documentação oficial)
 

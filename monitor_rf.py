@@ -89,9 +89,15 @@ def obter_token() -> str:
 # Busca de dados
 # ---------------------------------------------------------------------------
 def _headers_api(token: str) -> dict:
-    """Headers padrão para chamadas autenticadas à API ANBIMA."""
+    """Headers padrão para chamadas autenticadas à API ANBIMA.
+
+    A ANBIMA usa o gateway Sensedia, que não segue o padrão OAuth Bearer:
+    o token vai no header literal `access_token` (confirmado via teste real —
+    o campo `token_type` da resposta de /oauth/access-token retorna
+    "access_token", não "Bearer").
+    """
     return {
-        "Authorization": f"Bearer {token}",
+        "access_token": token,
         "client_id": ANBIMA_CLIENT_ID,
         "Content-Type": "application/json",
     }
