@@ -1,177 +1,39 @@
-"""
-Monitor diário de índices de renda fixa ANBIMA.
-Envia resumo via Telegram às 20h30 BRT (dias úteis).
-Dados: IDA-DI, IDA-IPCA, IDA-IPCA Infraestrutura, IDA-IPCA ex-Infraestrutura,
-       IMA-B, IMA-B 5, IMA-B 5+.
-Fonte: API Índices+ da ANBIMA (precos-indices/v1/indices-mais).
-"""
-
-import base64
 import logging
 import os
-from datetime import date, timedelta
-
-import requests
-from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
-
-from log_setup import setup_logging
-
 load_dotenv()
+import sys
+import requests
+from datetime import date, timedelta
+from apscheduler.schedulers.blocking import BlockingScheduler
+import yfinance as yf
 
-setup_logging(level=logging.INFO)
-log = logging.getLogger(__name__)
+# Configuração de log
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+log = logging.getLogger("monitor_rf")
 
-# ---------------------------------------------------------------------------
-# Configuração — defina tudo no .env, nunca aqui
-# ---------------------------------------------------------------------------
-ANBIMA_CLIENT_ID     = os.environ.get("ANBIMA_CLIENT_ID", "")
-ANBIMA_CLIENT_SECRET = os.environ.get("ANBIMA_CLIENT_SECRET", "")
 TELEGRAM_TOKEN       = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-# URLs da API ANBIMA (validadas na documentação oficial)
-TOKEN_URL = "https://api.anbima.com.br/oauth/access-token"
-IDA_URL   = "https://api.anbima.com.br/feed/precos-indices/v1/indices-mais/resultados-ida"
-IMA_URL   = "https://api.anbima.com.br/feed/precos-indices/v1/indices-mais/resultados-ima"
-
-# Subíndices desejados — nomes conforme campo `indice` da resposta da API.
-# Se os nomes retornados pela API diferirem, ajuste aqui após a primeira execução com credenciais.
-INDICES_IDA = {
-    "IDA-DI",
-    "IDA-IPCA",
-    "IDA-IPCA Infraestrutura",
-    "IDA-IPCA ex-Infraestrutura",
-}
-INDICES_IMA = {
-    "IMA-B",
-    "IMA-B 5",
-    "IMA-B 5+",
-}
-
 TIMEOUT = 15  # segundos para chamadas HTTP
 
-
-# ---------------------------------------------------------------------------
-# Autenticação OAuth2 client_credentials
-# ---------------------------------------------------------------------------
-def obter_token() -> str:
-    """Obtém access_token via OAuth2 client_credentials.
-
-    A ANBIMA usa Basic Auth (base64(client_id:client_secret)) no header
-    e {"grant_type": "client_credentials"} no body JSON.
-    Token expira em 3600s — renovado a cada execução do job.
-    """
-    credencial = base64.b64encode(
-        f"{ANBIMA_CLIENT_ID}:{ANBIMA_CLIENT_SECRET}".encode()
-    ).decode()
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Basic {credencial}",
-    }
-    resp = requests.post(
-        TOKEN_URL,
-        json={"grant_type": "client_credentials"},
-        headers=headers,
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
-    token = resp.json().get("access_token", "")
-    if not token:
-        raise ValueError("Resposta da ANBIMA não contém access_token.")
-    log.info("Token ANBIMA obtido com sucesso.")
-    return token
-
-
-# ---------------------------------------------------------------------------
-# Busca de dados
-# ---------------------------------------------------------------------------
-def _headers_api(token: str) -> dict:
-    """Headers padrão para chamadas autenticadas à API ANBIMA.
-
-    A ANBIMA usa o gateway Sensedia, que não segue o padrão OAuth Bearer:
-    o token vai no header literal `access_token` (confirmado via teste real —
-    o campo `token_type` da resposta de /oauth/access-token retorna
-    "access_token", não "Bearer").
-    """
-    return {
-        "access_token": token,
-        "client_id": ANBIMA_CLIENT_ID,
-        "Content-Type": "application/json",
-    }
-
+TICKERS = {
+    "IMA-B (Proxy IMAB11.SA)": "IMAB11.SA",
+    "IRF-M (Proxy IRFM11.SA)": "IRFM11.SA",
+    "IMA-B 5+ (Proxy B5P211.SA)": "B5P211.SA"
+}
 
 def _dia_util_anterior() -> str:
-    """Retorna a data do último dia útil (D-1) em formato AAAA-MM-DD.
-
-    Considera apenas fins de semana — feriados nacionais não são tratados
-    automaticamente (limitação conhecida, ver CLAUDE.md).
-    """
+    """Returns the date of the last business day (D-1) in YYYY-MM-DD format."""
     d = date.today() - timedelta(days=1)
-    # volta até encontrar um dia útil (seg=0 ... sex=4)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 
-
-def buscar_ida(token: str, data_ref: str) -> list[dict]:
-    """Busca resultados do IDA (Índice de Debêntures ANBIMA) para a data informada.
-
-    Retorna lista de dicts filtrada pelos subíndices em INDICES_IDA.
-    Publicado diariamente a partir das 11h.
-    """
-    resp = requests.get(
-        IDA_URL,
-        params={"data": data_ref},
-        headers=_headers_api(token),
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
-    dados = resp.json()
-
-    # Loga nomes recebidos para facilitar calibração dos filtros
-    nomes = {item.get("indice") for item in dados}
-    log.info(f"IDA — índices recebidos: {nomes}")
-
-    filtrados = [item for item in dados if item.get("indice") in INDICES_IDA]
-    nao_encontrados = INDICES_IDA - {item.get("indice") for item in filtrados}
-    if nao_encontrados:
-        log.warning(f"IDA — não encontrados na resposta: {nao_encontrados}")
-
-    return filtrados
-
-
-def buscar_ima(token: str, data_ref: str) -> list[dict]:
-    """Busca resultados do IMA (Índice de Mercado ANBIMA) para a data informada.
-
-    Retorna lista de dicts filtrada pelos subíndices em INDICES_IMA.
-    Publicado diariamente a partir das 20h.
-    """
-    resp = requests.get(
-        IMA_URL,
-        params={"data": data_ref},
-        headers=_headers_api(token),
-        timeout=TIMEOUT,
-    )
-    resp.raise_for_status()
-    dados = resp.json()
-
-    nomes = {item.get("indice") for item in dados}
-    log.info(f"IMA — índices recebidos: {nomes}")
-
-    filtrados = [item for item in dados if item.get("indice") in INDICES_IMA]
-    nao_encontrados = INDICES_IMA - {item.get("indice") for item in filtrados}
-    if nao_encontrados:
-        log.warning(f"IMA — não encontrados na resposta: {nao_encontrados}")
-
-    return filtrados
-
-
-# ---------------------------------------------------------------------------
-# Formatação da mensagem
-# ---------------------------------------------------------------------------
 def _formatar_variacao(valor) -> str:
-    """Formata variação percentual com sinal e 4 casas decimais."""
     try:
         v = float(valor)
         sinal = "+" if v >= 0 else ""
@@ -179,130 +41,90 @@ def _formatar_variacao(valor) -> str:
     except (TypeError, ValueError):
         return "N/D"
 
+def buscar_dados_yfinance() -> dict:
+    """Fetches ETF data from Yahoo Finance as a proxy for ANBIMA indices."""
+    resultados = {}
+    for nome, ticker in TICKERS.items():
+        try:
+            t = yf.Ticker(ticker)
+            data = t.history(period="1y")
+            if not data.empty and len(data) >= 2:
+                fechamento_atual = data.iloc[-1]['Close']
+                fechamento_anterior = data.iloc[-2]['Close']
+                variacao_diaria = ((fechamento_atual / fechamento_anterior) - 1) * 100
 
-def montar_mensagem(data_ref: str, ida: list[dict], ima: list[dict]) -> str:
-    """Monta o resumo formatado para envio no Telegram."""
+                fechamento_1y_atras = data.iloc[0]['Close']
+                variacao_anual = ((fechamento_atual / fechamento_1y_atras) - 1) * 100
+
+                resultados[nome] = {
+                    "variacao_diaria": variacao_diaria,
+                    "variacao_anual": variacao_anual
+                }
+            else:
+                log.warning(f"Não foi possível obter histórico suficiente para {ticker}")
+                resultados[nome] = None
+        except Exception as e:
+            log.error(f"Erro ao buscar {ticker}: {e}")
+            resultados[nome] = None
+    return resultados
+
+def montar_mensagem(data_ref: str, resultados: dict) -> str:
     linhas = [
-        f"📊 *Índices ANBIMA — {data_ref}*",
-        "",
-        "*IDA (Debêntures)*",
+        f"📊 *Índices ANBIMA (Proxies B3) — {data_ref}*",
+        ""
     ]
 
-    # Ordem de exibição dos subíndices IDA
-    ordem_ida = [
-        "IDA-DI",
-        "IDA-IPCA",
-        "IDA-IPCA Infraestrutura",
-        "IDA-IPCA ex-Infraestrutura",
-    ]
-    ida_por_nome = {item["indice"]: item for item in ida}
-    for nome in ordem_ida:
-        item = ida_por_nome.get(nome)
-        if item:
-            dia = _formatar_variacao(item.get("variacao_diaria"))
-            ano = _formatar_variacao(item.get("variacao_anual"))
-            linhas.append(f"  {nome}: dia {dia} | ano {ano}")
+    for nome, dados in resultados.items():
+        if dados:
+            dia = _formatar_variacao(dados['variacao_diaria'])
+            ano = _formatar_variacao(dados['variacao_anual'])
+            linhas.append(f"*{nome}*\n  Dia {dia} | 12 Meses {ano}\n")
         else:
-            linhas.append(f"  {nome}: dados indisponíveis")
+            linhas.append(f"*{nome}*\n  Dados indisponíveis\n")
 
-    linhas += ["", "*IMA-B (NTN-B)*"]
-
-    # Ordem de exibição dos subíndices IMA
-    ordem_ima = ["IMA-B", "IMA-B 5", "IMA-B 5+"]
-    ima_por_nome = {item["indice"]: item for item in ima}
-    for nome in ordem_ima:
-        item = ima_por_nome.get(nome)
-        if item:
-            dia = _formatar_variacao(item.get("variacao_diaria"))
-            ano = _formatar_variacao(item.get("variacao_anual"))
-            linhas.append(f"  {nome}: dia {dia} | ano {ano}")
-        else:
-            linhas.append(f"  {nome}: dados indisponíveis")
-
+    linhas.append("_Fonte: Yahoo Finance (ETFs B3)_")
     return "\n".join(linhas)
 
-
-# ---------------------------------------------------------------------------
-# Envio via Telegram
-# ---------------------------------------------------------------------------
 def enviar_telegram(mensagem: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("Telegram não configurado — mensagem não enviada:\n%s", mensagem)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": mensagem,
+        "parse_mode": "Markdown",
+    }
     try:
-        resp = requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": mensagem,
-                "parse_mode": "Markdown",
-            },
-            timeout=TIMEOUT,
-        )
+        resp = requests.post(url, json=payload, timeout=TIMEOUT)
         resp.raise_for_status()
         log.info("Resumo enviado ao Telegram.")
     except requests.RequestException as exc:
         log.error("Falha ao enviar Telegram: %s", exc)
 
-
-# ---------------------------------------------------------------------------
-# Job principal
-# ---------------------------------------------------------------------------
 def executar() -> None:
     log.info("--- executando job renda fixa ---")
-
-    if not ANBIMA_CLIENT_ID or not ANBIMA_CLIENT_SECRET:
-        log.error("ANBIMA_CLIENT_ID ou ANBIMA_CLIENT_SECRET não configurados no .env")
-        return
 
     data_ref = _dia_util_anterior()
     log.info("Data de referência: %s", data_ref)
 
-    try:
-        token = obter_token()
-    except Exception as exc:
-        log.error("Falha na autenticação ANBIMA: %s", exc)
-        enviar_telegram(f"⚠️ Monitor RF: falha na autenticação ANBIMA ({exc})")
-        return
+    resultados = buscar_dados_yfinance()
 
-    ida, ima = [], []
-
-    try:
-        ida = buscar_ida(token, data_ref)
-    except Exception as exc:
-        log.error("Falha ao buscar IDA: %s", exc)
-
-    try:
-        ima = buscar_ima(token, data_ref)
-    except Exception as exc:
-        log.error("Falha ao buscar IMA: %s", exc)
-
-    if not ida and not ima:
+    if not any(resultados.values()):
         log.warning("Nenhum dado obtido — não há mensagem para enviar.")
         return
 
-    mensagem = montar_mensagem(data_ref, ida, ima)
+    mensagem = montar_mensagem(data_ref, resultados)
     log.info("Mensagem montada:\n%s", mensagem)
     enviar_telegram(mensagem)
 
-
-# ---------------------------------------------------------------------------
-# Agendamento
-# ---------------------------------------------------------------------------
 def main() -> None:
-    if not ANBIMA_CLIENT_ID or not ANBIMA_CLIENT_SECRET:
-        log.warning(
-            "ANBIMA_CLIENT_ID ou ANBIMA_CLIENT_SECRET não configurados — "
-            "o job será agendado mas não conseguirá buscar dados."
-        )
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("Telegram não configurado — resumos serão apenas logados.")
 
     scheduler = BlockingScheduler(timezone="America/Sao_Paulo")
 
     # Dias úteis (seg–sex) às 20h30 BRT.
-    # Feriados nacionais não são filtrados automaticamente (ver CLAUDE.md).
     scheduler.add_job(
         executar,
         trigger="cron",
@@ -311,12 +133,11 @@ def main() -> None:
         minute=30,
     )
 
-    log.info("Monitor RF iniciado — job agendado para seg–sex às 20h30 BRT.")
+    log.info("Monitor RF (yfinance proxy) iniciado — job agendado para seg–sex às 20h30 BRT.")
     try:
         scheduler.start()
     except KeyboardInterrupt:
         log.info("Monitor RF encerrado.")
-
 
 if __name__ == "__main__":
     main()
