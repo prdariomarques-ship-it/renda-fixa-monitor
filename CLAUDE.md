@@ -1,86 +1,49 @@
 # renda-fixa-monitor
 
-Agente diário que busca os fechamentos dos índices de renda fixa da ANBIMA e envia um resumo via Telegram.
+Agente diário que acompanha proxies de renda fixa negociados na B3 e envia um resumo via Telegram.
 
-## O que faz
+## Fonte e cobertura
 
-- Job único às **20h30 BRT, dias úteis (seg–sex)**.
-- Busca dados D-1 de dois endpoints da API Índices+ da ANBIMA:
-  - `resultados-ida` → IDA-DI, IDA-IPCA, IDA-IPCA Infraestrutura, IDA-IPCA ex-Infraestrutura
-  - `resultados-ima` → IMA-B, IMA-B 5, IMA-B 5+
-- Envia resumo formatado no Telegram com variação do dia e no ano por índice.
+Os dados são obtidos do Yahoo Finance para estes ETFs:
 
-## Por que 20h30
+| Referência aproximada | Ticker | Uso no relatório |
+|---|---|---|
+| IMA-B | `IMAB11.SA` | Variação diária e em 12 meses |
+| IRF-M | `IRFM11.SA` | Variação diária e em 12 meses |
+| IMA-B 5+ | `B5P211.SA` | Variação diária e em 12 meses |
 
-- IDA é publicado a partir das 11h — dado D-1 disponível de manhã.
-- IMA-B é publicado a partir das **20h** — dado D-1 só disponível à noite.
-- Um job único às 20h30 garante que ambos os índices estejam com D-1 completo.
+Os ETFs são proxies negociados na B3; seus resultados podem divergir dos índices que representam. O programa não consulta uma API oficial de índices nem depende de credenciais de dados pagas.
 
-## Autenticação ANBIMA
+## Configuração
 
-OAuth2 client_credentials (validado na documentação oficial):
+Instale as dependências:
 
-```
-POST https://api.anbima.com.br/oauth/access-token
-Authorization: Basic base64(client_id:client_secret)
-Content-Type: application/json
-Body: {"grant_type": "client_credentials"}
+```bash
+python -m pip install -r requirements.txt
 ```
 
-Token expira em 3600s — renovado a cada execução do job.
+Defina estas variáveis no arquivo `.env` na pasta do projeto:
 
-Chamadas à API usam header literal `access_token: <token>` + header `client_id`
-(**não** é `Authorization: Bearer` — a ANBIMA usa gateway Sensedia, que exige o
-header com o nome indicado pelo campo `token_type` da resposta de
-`/oauth/access-token`, que retorna `"access_token"`. Confirmado via teste real
-em 2026-07-20).
-
-**Ambientes**: Sandbox e Produção são separados. Acesso à API em Produção exige
-contato manual com `anbimafeed@anbima.com.br` — aprovação do app no portal e
-assinatura do produto "Índices+" não são suficientes por si só (erro observado:
-`403 Access denied for this environment`).
-
-## Endpoints (documentação oficial)
-
-| Índice | Endpoint | Publicação |
-|--------|----------|------------|
-| IDA | `GET https://api.anbima.com.br/feed/precos-indices/v1/indices-mais/resultados-ida?data=AAAA-MM-DD` | 11h+ |
-| IMA | `GET https://api.anbima.com.br/feed/precos-indices/v1/indices-mais/resultados-ima?data=AAAA-MM-DD` | 20h+ |
-
-Campos usados: `indice`, `variacao_diaria`, `variacao_anual`, `data_referencia`.
-
-## Credenciais necessárias no .env
-
-```
-ANBIMA_CLIENT_ID=       ← gerado no portal developers.anbima.com.br
-ANBIMA_CLIENT_SECRET=   ← gerado no portal developers.anbima.com.br
-TELEGRAM_TOKEN=         ← mesmo bot do spcx-monitor e signal-engine
-TELEGRAM_CHAT_ID=883232211
+```dotenv
+TELEGRAM_TOKEN=token_do_bot
+TELEGRAM_CHAT_ID=id_do_chat
 ```
 
-## Calibração dos nomes de índice
-
-Os nomes em `INDICES_IDA` e `INDICES_IMA` em `monitor_rf.py` precisam bater exatamente
-com o campo `indice` retornado pela API. Na primeira execução com credenciais reais,
-o log imprime todos os nomes recebidos — ajuste os sets se necessário.
-
-## Limitações conhecidas
-
-- **Feriados nacionais**: o APScheduler filtra apenas fins de semana. Em feriados o job
-  tenta executar e a API pode retornar dados vazios ou erro — comportamento esperado,
-  não é bug.
-- **Sem retry automático**: se a API falhar, o próximo ciclo é no dia seguinte. Adicionar
-  retry com backoff se a confiabilidade for crítica.
+O `.env` está no `.gitignore`; não versione nem compartilhe o token real do bot.
 
 ## Execução
 
 ```bash
 cd ~/projects/renda-fixa-monitor
-python monitor_rf.py          # inicia scheduler
+python monitor_rf.py
 ```
 
-Em produção: **systemd user service** (`renda-fixa-monitor.service`).
+O processo fica ativo e agenda uma consulta de segunda a sexta às 20h30, no fuso `America/Sao_Paulo`. A primeira consulta ocorre no próximo horário agendado; iniciar o processo não dispara um relatório imediatamente. Os logs aparecem no console.
 
-## Dependências
+Em produção, o processo pode ser mantido por um serviço `systemd --user` chamado `renda-fixa-monitor.service`.
 
-`requests`, `python-dotenv`, `apscheduler`.
+## Limitações
+
+- A variação é calculada com dados históricos dos ETFs retornados pelo Yahoo Finance; indisponibilidade ou atraso dessa fonte pode afetar o relatório.
+- O agendador considera dias da semana, não feriados. Se nenhum ETF tiver dados suficientes, o programa registra o problema e não envia um relatório vazio.
+- O intervalo de 12 meses usa o primeiro fechamento disponível na janela de um ano retornada pela fonte.
