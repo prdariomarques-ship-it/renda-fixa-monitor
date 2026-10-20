@@ -42,7 +42,7 @@ def _formatar_variacao(valor) -> str:
         return "N/D"
 
 def buscar_dados_yfinance() -> dict:
-    """Fetches ETF data from Yahoo Finance as a proxy for ANBIMA indices."""
+    """Fetches B3-listed fixed-income ETF data from Yahoo Finance as proxies."""
     resultados = {}
     for nome, ticker in TICKERS.items():
         try:
@@ -70,7 +70,7 @@ def buscar_dados_yfinance() -> dict:
 
 def montar_mensagem(data_ref: str, resultados: dict) -> str:
     linhas = [
-        f"📊 *Índices ANBIMA (Proxies B3) — {data_ref}*",
+        f"📊 *Renda Fixa Brasil (Proxies B3) — {data_ref}*",
         ""
     ]
 
